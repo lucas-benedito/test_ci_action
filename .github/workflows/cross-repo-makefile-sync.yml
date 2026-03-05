@@ -167,19 +167,30 @@ jobs:
           git add Makefile scripts/common.mk
           git diff --quiet Dockerfile 2>/dev/null || git add Dockerfile
 
-          git commit -m "chore: sync Makefile standardization from gateway-operator
+          # Build dynamic file list from staged changes
+          CHANGED_FILES=$(git diff --cached --name-only)
+          FILE_LIST=""
+          echo "${CHANGED_FILES}" | grep -q '^Makefile$' && \
+            FILE_LIST="${FILE_LIST}\n- Makefile (standardized, identical across all operator repos)"
+          echo "${CHANGED_FILES}" | grep -q '^scripts/common.mk$' && \
+            FILE_LIST="${FILE_LIST}\n- scripts/common.mk (shared dev workflow targets)"
+          echo "${CHANGED_FILES}" | grep -q '^Dockerfile$' && \
+            FILE_LIST="${FILE_LIST}\n- Dockerfile (FROM line updated to SDK ${SDK_VERSION})"
 
-          Synced files:
-          - Makefile (standardized, identical across all operator repos)
-          - scripts/common.mk (shared dev workflow targets)
-          - Dockerfile (FROM line updated to SDK ${SDK_VERSION})
-
-          SDK version: ${SDK_VERSION}
-          Source: aap-gateway-operator (Proposal 0100)
-
-          Authored-By: AAP Makefile Sync <aap-makefile-sync[bot]@users.noreply.github.com>"
+          git commit -m "$(printf "chore: sync Makefile standardization from gateway-operator\n\nSynced files:${FILE_LIST}\n\nSDK version: ${SDK_VERSION}\nSource: aap-gateway-operator (Proposal 0100)\n\nAuthored-By: AAP Makefile Sync <aap-makefile-sync[bot]@users.noreply.github.com>")"
 
           git push -f origin "${SYNC_BRANCH}"
+
+          # Build PR body from changed files
+          PR_FILE_LIST=""
+          echo "${CHANGED_FILES}" | grep -q '^Makefile$' && \
+            PR_FILE_LIST="${PR_FILE_LIST}- \`Makefile\` — standardized Makefile (identical across all operator repos)\n"
+          echo "${CHANGED_FILES}" | grep -q '^scripts/common.mk$' && \
+            PR_FILE_LIST="${PR_FILE_LIST}- \`scripts/common.mk\` — shared dev workflow targets (\`make up\`, \`make down\`, registry auth, namespace mgmt, ARM builds)\n"
+          echo "${CHANGED_FILES}" | grep -q '^Dockerfile$' && \
+            PR_FILE_LIST="${PR_FILE_LIST}- \`Dockerfile\` — FROM line updated to match SDK version ${SDK_VERSION}\n"
+
+          PR_BODY="$(printf "## Summary\n\nAutomated sync of Makefile standardization files from \`aap-gateway-operator\` (Proposal 0100).\n\n### Files synced\n${PR_FILE_LIST}\n### What to do\n1. Review the synced files\n2. Ensure your operator-specific config is in \`scripts/operator.mk\` (not synced, operator-owned)\n   - \`VERSION\`, \`IMAGE_TAG_BASE\`, \`NAMESPACE\`, \`DEPLOYMENT_NAME\`, etc.\n3. Test: \`make help\` should show targets from all three files\n4. Merge when ready\n\n---\n*Automated by Cross-Repo Makefile Sync*")"
 
           # Check for existing open PR via GitHub API
           EXISTING_PR=$(curl -sf \
@@ -195,30 +206,8 @@ jobs:
               -H "Accept: application/vnd.github.v3+json" \
               -X POST \
               "https://api.github.com/repos/${REPO}/issues/${EXISTING_PR}/comments" \
-              -d "{\"body\": \"Sync updated. SDK version: ${SDK_VERSION}\"}" > /dev/null
+              -d "$(jq -n --arg body "Sync updated.\n\nFiles changed:\n${PR_FILE_LIST}\nSDK version: ${SDK_VERSION}" '{body: $body}')" > /dev/null
           else
-            PR_BODY=$(cat <<'PRBODY'
-          ## Summary
-
-          Automated sync of Makefile standardization files from `aap-gateway-operator` (Proposal 0100).
-
-          ### Files synced
-          - `Makefile` — standardized Makefile (identical across all operator repos)
-          - `scripts/common.mk` — shared dev workflow targets (`make up`, `make down`, registry auth, namespace mgmt, ARM builds)
-          - `Dockerfile` — FROM line updated to match SDK version
-
-          ### What to do
-          1. Review the synced files
-          2. Ensure your operator-specific config is in `scripts/operator.mk` (not synced, operator-owned)
-             - `VERSION`, `IMAGE_TAG_BASE`, `NAMESPACE`, `DEPLOYMENT_NAME`, etc.
-          3. Test: `make help` should show targets from all three files
-          4. Merge when ready
-
-          ---
-          *Automated by Cross-Repo Makefile Sync*
-          PRBODY
-          )
-
             curl -sf \
               -H "Authorization: token ${GITHUB_TOKEN}" \
               -H "Accept: application/vnd.github.v3+json" \
