@@ -1,0 +1,234 @@
+---
+name: Cross-Repo Makefile Sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Makefile'
+      - 'scripts/common.mk'
+  schedule:
+    # Weekly sync (Monday 9am UTC, after makefile-sync at 8am)
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Show diff without creating PRs'
+        required: false
+        type: boolean
+        default: false
+      target_repo:
+        description: 'Sync only this repo (e.g. awx-operator). Leave empty for all.'
+        required: false
+        type: string
+
+jobs:
+  sync-repos:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # TEST ONLY — revert before merging
+          - repo: test_ci_action
+            org: lucas-benedito
+            default_branch: main
+          # - repo: aap-gateway-operator
+          #   org: ansible
+          #   default_branch: main
+          # - repo: awx-operator
+          #   org: ansible
+          #   default_branch: devel
+          # - repo: awx-resource-operator
+          #   org: ansible
+          #   default_branch: devel
+          # - repo: eda-server-operator
+          #   org: ansible
+          #   default_branch: main
+          # - repo: galaxy-operator
+          #   org: ansible
+          #   default_branch: main
+          # - repo: ansible-ai-connect-operator
+          #   org: ansible
+          #   default_branch: main
+    env:
+      SYNC_BRANCH: automation/makefile-sync
+
+    steps:
+      - name: Skip if not targeted
+        if: >-
+          inputs.target_repo != '' &&
+          inputs.target_repo != matrix.repo
+        run: |
+          echo "Skipping ${{ matrix.repo }} (target_repo=${{ inputs.target_repo }})"
+          echo "SKIP=true" >> "$GITHUB_ENV"
+
+      - name: Checkout source (gateway-operator)
+        if: env.SKIP != 'true'
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Resolve SDK version
+        if: env.SKIP != 'true'
+        id: sdk
+        run: |
+          SDK_VER=$(grep 'OPERATOR_SDK_VERSION' source/Makefile | head -1 | grep -o 'v[0-9.]*')
+          echo "version=${SDK_VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout target repo
+        if: env.SKIP != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.org }}/${{ matrix.repo }}
+          token: ${{ secrets.CROSS_REPO_PAT }}
+          ref: ${{ matrix.default_branch }}
+          path: target
+
+      - name: Copy synced files
+        if: env.SKIP != 'true'
+        run: |
+          mkdir -p target/scripts/
+          cp source/Makefile target/Makefile
+          cp source/scripts/common.mk target/scripts/common.mk
+
+      - name: Update Dockerfile FROM line
+        if: env.SKIP != 'true'
+        run: |
+          cd target
+          if [ -f Dockerfile ]; then
+            sed -i "s|^FROM quay.io/operator-framework/ansible-operator:.*|FROM quay.io/operator-framework/ansible-operator:${{ steps.sdk.outputs.version }}|" Dockerfile
+          fi
+
+      - name: Check for changes
+        if: env.SKIP != 'true'
+        id: changes
+        env:
+          GITHUB_TOKEN: ${{ secrets.CROSS_REPO_PAT }}
+        run: |
+          cd target
+
+          # First check if there are any changes vs the default branch
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No changes vs default branch for ${{ matrix.repo }}"
+            exit 0
+          fi
+
+          # Changes exist vs default branch — but does the sync branch already have them?
+          if git ls-remote --exit-code origin "${SYNC_BRANCH}" >/dev/null 2>&1; then
+            echo "Sync branch exists, comparing against it..."
+            git fetch origin "${SYNC_BRANCH}" --depth=1
+            # Stage our intended changes so we can compare tree content
+            git add -A
+            INTENDED_TREE=$(git write-tree)
+            EXISTING_TREE=$(git rev-parse "FETCH_HEAD^{tree}")
+            if [ "${INTENDED_TREE}" = "${EXISTING_TREE}" ]; then
+              echo "has_changes=false" >> "$GITHUB_OUTPUT"
+              echo "Sync branch already has identical content for ${{ matrix.repo }} — skipping"
+              exit 0
+            fi
+            echo "Sync branch exists but content differs"
+            git reset HEAD  # unstage
+          fi
+
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          echo "### Changes in ${{ matrix.repo }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          git diff --stat >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show diff (dry run)
+        if: >-
+          env.SKIP != 'true' &&
+          steps.changes.outputs.has_changes == 'true' &&
+          inputs.dry_run == true
+        run: |
+          cd target
+          git diff
+
+      - name: Create branch, commit, and PR
+        if: >-
+          env.SKIP != 'true' &&
+          steps.changes.outputs.has_changes == 'true' &&
+          inputs.dry_run != true
+        env:
+          GITHUB_TOKEN: ${{ secrets.CROSS_REPO_PAT }}
+          SDK_VERSION: ${{ steps.sdk.outputs.version }}
+        run: |
+          cd target
+          REPO="${{ matrix.org }}/${{ matrix.repo }}"
+          BASE="${{ matrix.default_branch }}"
+
+          git config user.name "AAP Makefile Sync"
+          git config user.email "aap-makefile-sync[bot]@users.noreply.github.com"
+
+          git checkout -b "${SYNC_BRANCH}"
+          git add Makefile scripts/common.mk
+          git diff --quiet Dockerfile 2>/dev/null || git add Dockerfile
+
+          git commit -m "chore: sync Makefile standardization from gateway-operator
+
+          Synced files:
+          - Makefile (standardized, identical across all operator repos)
+          - scripts/common.mk (shared dev workflow targets)
+          - Dockerfile (FROM line updated to SDK ${SDK_VERSION})
+
+          SDK version: ${SDK_VERSION}
+          Source: aap-gateway-operator (Proposal 0100)
+
+          Authored-By: AAP Makefile Sync <aap-makefile-sync[bot]@users.noreply.github.com>"
+
+          git push -f origin "${SYNC_BRANCH}"
+
+          # Check for existing open PR via GitHub API
+          EXISTING_PR=$(curl -sf \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${REPO}/pulls?head=${SYNC_BRANCH}&state=open" \
+            | jq -r '.[0].number // empty')
+
+          if [ -n "${EXISTING_PR}" ]; then
+            echo "Updated existing PR #${EXISTING_PR} in ${REPO}"
+            curl -sf \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -X POST \
+              "https://api.github.com/repos/${REPO}/issues/${EXISTING_PR}/comments" \
+              -d "{\"body\": \"Sync updated. SDK version: ${SDK_VERSION}\"}" > /dev/null
+          else
+            PR_BODY=$(cat <<'PRBODY'
+          ## Summary
+
+          Automated sync of Makefile standardization files from `aap-gateway-operator` (Proposal 0100).
+
+          ### Files synced
+          - `Makefile` — standardized Makefile (identical across all operator repos)
+          - `scripts/common.mk` — shared dev workflow targets (`make up`, `make down`, registry auth, namespace mgmt, ARM builds)
+          - `Dockerfile` — FROM line updated to match SDK version
+
+          ### What to do
+          1. Review the synced files
+          2. Ensure your operator-specific config is in `scripts/operator.mk` (not synced, operator-owned)
+             - `VERSION`, `IMAGE_TAG_BASE`, `NAMESPACE`, `DEPLOYMENT_NAME`, etc.
+          3. Test: `make help` should show targets from all three files
+          4. Merge when ready
+
+          ---
+          *Automated by Cross-Repo Makefile Sync*
+          PRBODY
+          )
+
+            curl -sf \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              -X POST \
+              "https://api.github.com/repos/${REPO}/pulls" \
+              -d "$(jq -n \
+                --arg title "chore: sync Makefile standardization (Proposal 0100)" \
+                --arg head "${SYNC_BRANCH}" \
+                --arg base "${BASE}" \
+                --arg body "${PR_BODY}" \
+                '{title: $title, head: $head, base: $base, body: $body}')"
+            echo "Created PR in ${REPO}"
+          fi
