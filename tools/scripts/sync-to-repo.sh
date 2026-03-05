@@ -83,6 +83,10 @@ cp "${SOURCE_DIR}/Makefile" "${WORK_DIR}/Makefile"
 cp "${SOURCE_DIR}/scripts/common.mk" "${WORK_DIR}/scripts/common.mk"
 echo "Copied Makefile and scripts/common.mk"
 
+# Update OPERATOR_SDK_VERSION in the copied Makefile
+sed -i "s|^OPERATOR_SDK_VERSION ?= .*|OPERATOR_SDK_VERSION ?= ${SDK_VERSION}|" \
+    "${WORK_DIR}/Makefile"
+
 # Update Dockerfile FROM line (if Dockerfile exists)
 if [ -f "${WORK_DIR}/Dockerfile" ]; then
     sed -i "s|^FROM quay.io/operator-framework/ansible-operator:.*|FROM quay.io/operator-framework/ansible-operator:${SDK_VERSION}|" \
