@@ -21,6 +21,10 @@ on:
         description: 'Sync only this repo (e.g. awx-operator). Leave empty for all.'
         required: false
         type: string
+      sdk_version:
+        description: 'Override SDK version (e.g. v1.37.0). Leave empty to use Makefile value.'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -77,11 +81,17 @@ jobs:
       - name: Resolve SDK version
         if: env.SKIP != 'true'
         id: sdk
+        env:
+          INPUT_SDK_VERSION: ${{ inputs.sdk_version }}
         run: |
-          SDK_VER=$(grep 'OPERATOR_SDK_VERSION' Makefile | head -1 | grep -o 'v[0-9.]*')
-          if [ -z "${SDK_VER}" ]; then
-            echo "ERROR: Could not resolve OPERATOR_SDK_VERSION from Makefile"
-            exit 1
+          if [ -n "${INPUT_SDK_VERSION}" ]; then
+            SDK_VER="${INPUT_SDK_VERSION}"
+          else
+            SDK_VER=$(grep 'OPERATOR_SDK_VERSION' Makefile | head -1 | grep -o 'v[0-9.]*')
+            if [ -z "${SDK_VER}" ]; then
+              echo "ERROR: Could not resolve OPERATOR_SDK_VERSION from Makefile"
+              exit 1
+            fi
           fi
           echo "version=${SDK_VER}" >> "$GITHUB_OUTPUT"
 
