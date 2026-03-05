@@ -22,9 +22,15 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   sync-repos:
     runs-on: ubuntu-latest
+    concurrency:
+      group: cross-repo-sync-${{ matrix.repo }}
+      cancel-in-progress: true
     strategy:
       fail-fast: false
       matrix:
@@ -59,8 +65,11 @@ jobs:
         if: >-
           inputs.target_repo != '' &&
           inputs.target_repo != matrix.repo
+        env:
+          MATRIX_REPO: ${{ matrix.repo }}
+          INPUT_TARGET_REPO: ${{ inputs.target_repo }}
         run: |
-          echo "Skipping ${{ matrix.repo }} (target_repo=${{ inputs.target_repo }})"
+          echo "Skipping ${MATRIX_REPO} (target_repo=${INPUT_TARGET_REPO})"
           echo "SKIP=true" >> "$GITHUB_ENV"
 
       - name: Checkout source (gateway-operator)
@@ -74,6 +83,10 @@ jobs:
         id: sdk
         run: |
           SDK_VER=$(grep 'OPERATOR_SDK_VERSION' source/Makefile | head -1 | grep -o 'v[0-9.]*')
+          if [ -z "${SDK_VER}" ]; then
+            echo "ERROR: Could not resolve OPERATOR_SDK_VERSION from Makefile"
+            exit 1
+          fi
           echo "version=${SDK_VER}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout target repo
@@ -94,24 +107,26 @@ jobs:
 
       - name: Update Dockerfile FROM line
         if: env.SKIP != 'true'
+        env:
+          SDK_VERSION: ${{ steps.sdk.outputs.version }}
         run: |
           cd target
           if [ -f Dockerfile ]; then
-            sed -i "s|^FROM quay.io/operator-framework/ansible-operator:.*|FROM quay.io/operator-framework/ansible-operator:${{ steps.sdk.outputs.version }}|" Dockerfile
+            sed -i "s|^FROM quay.io/operator-framework/ansible-operator:.*|FROM quay.io/operator-framework/ansible-operator:${SDK_VERSION}|" Dockerfile
           fi
 
       - name: Check for changes
         if: env.SKIP != 'true'
         id: changes
         env:
-          GITHUB_TOKEN: ${{ secrets.CROSS_REPO_PAT }}
+          MATRIX_REPO: ${{ matrix.repo }}
         run: |
           cd target
 
           # First check if there are any changes vs the default branch
           if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            echo "No changes vs default branch for ${{ matrix.repo }}"
+            echo "No changes vs default branch for ${MATRIX_REPO}"
             exit 0
           fi
 
@@ -125,15 +140,15 @@ jobs:
             EXISTING_TREE=$(git rev-parse "FETCH_HEAD^{tree}")
             if [ "${INTENDED_TREE}" = "${EXISTING_TREE}" ]; then
               echo "has_changes=false" >> "$GITHUB_OUTPUT"
-              echo "Sync branch already has identical content for ${{ matrix.repo }} — skipping"
+              echo "Sync branch already has identical content for ${MATRIX_REPO} — skipping"
               exit 0
             fi
             echo "Sync branch exists but content differs"
-            git reset HEAD  # unstage
+            git reset --quiet HEAD  # unstage
           fi
 
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          echo "### Changes in ${{ matrix.repo }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Changes in ${MATRIX_REPO}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           git diff --stat >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -155,17 +170,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.CROSS_REPO_PAT }}
           SDK_VERSION: ${{ steps.sdk.outputs.version }}
+          REPO: ${{ matrix.org }}/${{ matrix.repo }}
+          BASE: ${{ matrix.default_branch }}
+          MATRIX_ORG: ${{ matrix.org }}
         run: |
           cd target
-          REPO="${{ matrix.org }}/${{ matrix.repo }}"
-          BASE="${{ matrix.default_branch }}"
 
           git config user.name "AAP Makefile Sync"
           git config user.email "aap-makefile-sync[bot]@users.noreply.github.com"
 
           git checkout -b "${SYNC_BRANCH}"
           git add Makefile scripts/common.mk
-          git diff --quiet Dockerfile 2>/dev/null || git add Dockerfile
+          [ -f Dockerfile ] && { git diff --quiet Dockerfile 2>/dev/null || git add Dockerfile; }
 
           # Build dynamic file list from staged changes
           CHANGED_FILES=$(git diff --cached --name-only)
@@ -179,7 +195,8 @@ jobs:
 
           git commit -m "$(printf "chore: sync Makefile standardization from gateway-operator\n\nSynced files:${FILE_LIST}\n\nSDK version: ${SDK_VERSION}\nSource: aap-gateway-operator (Proposal 0100)\n\nAuthored-By: AAP Makefile Sync <aap-makefile-sync[bot]@users.noreply.github.com>")"
 
-          git push -f origin "${SYNC_BRANCH}"
+          git push --force-with-lease origin "${SYNC_BRANCH}" 2>/dev/null \
+            || git push -f origin "${SYNC_BRANCH}"
 
           # Build PR body from changed files
           PR_FILE_LIST=""
@@ -193,22 +210,31 @@ jobs:
           PR_BODY="$(printf "## Summary\n\nAutomated sync of Makefile standardization files from \`aap-gateway-operator\` (Proposal 0100).\n\n### Files synced\n${PR_FILE_LIST}\n### What to do\n1. Review the synced files\n2. Ensure your operator-specific config is in \`scripts/operator.mk\` (not synced, operator-owned)\n   - \`VERSION\`, \`IMAGE_TAG_BASE\`, \`NAMESPACE\`, \`DEPLOYMENT_NAME\`, etc.\n3. Test: \`make help\` should show targets from all three files\n4. Merge when ready\n\n---\n*Automated by Cross-Repo Makefile Sync*")"
 
           # Check for existing open PR via GitHub API
-          EXISTING_PR=$(curl -sf \
+          RESPONSE=$(curl -sS -w "\n%{http_code}" \
             -H "Authorization: token ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${REPO}/pulls?head=${SYNC_BRANCH}&state=open" \
-            | jq -r '.[0].number // empty')
+            "https://api.github.com/repos/${REPO}/pulls?head=${MATRIX_ORG}:${SYNC_BRANCH}&state=open")
+          HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
+          BODY=$(echo "${RESPONSE}" | head -n -1)
+
+          if [ "${HTTP_CODE}" -ge 400 ]; then
+            echo "ERROR: GitHub API returned ${HTTP_CODE} when listing PRs"
+            echo "${BODY}"
+            exit 1
+          fi
+
+          EXISTING_PR=$(echo "${BODY}" | jq -r '.[0].number // empty')
 
           if [ -n "${EXISTING_PR}" ]; then
             echo "Updated existing PR #${EXISTING_PR} in ${REPO}"
-            curl -sf \
+            curl -sS --fail-with-body \
               -H "Authorization: token ${GITHUB_TOKEN}" \
               -H "Accept: application/vnd.github.v3+json" \
               -X POST \
               "https://api.github.com/repos/${REPO}/issues/${EXISTING_PR}/comments" \
               -d "$(jq -n --arg body "Sync updated.\n\nFiles changed:\n${PR_FILE_LIST}\nSDK version: ${SDK_VERSION}" '{body: $body}')" > /dev/null
           else
-            curl -sf \
+            curl -sS --fail-with-body \
               -H "Authorization: token ${GITHUB_TOKEN}" \
               -H "Accept: application/vnd.github.v3+json" \
               -X POST \
