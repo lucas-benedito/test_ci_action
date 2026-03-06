@@ -195,5 +195,4 @@ _require-namespace:
 		echo "Error: NAMESPACE is required. Set it in operator.mk or run: export NAMESPACE=<namespace>"; \
 		exit 1; \
 	fi
-# Test change 1772821268
-# Common.mk sync test 1772821434
+...
