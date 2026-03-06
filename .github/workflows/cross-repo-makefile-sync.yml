@@ -67,7 +67,7 @@ jobs:
           CURRENT_VERSION: ${{ steps.current.outputs.version }}
           TARGET_VERSION: ${{ steps.sdk.outputs.version }}
         run: |
-          CHANGELOG_FILE="/tmp/sdk-changelog.md"
+          CHANGELOG_FILE="sdk-changelog.md"
 
           if [[ "${CURRENT_VERSION}" == "${TARGET_VERSION}" ]]; then
             echo "SDK version unchanged (${CURRENT_VERSION})" > "${CHANGELOG_FILE}"
@@ -132,7 +132,7 @@ jobs:
           name: sync-artifacts
           path: |
             Makefile.generated
-            /tmp/sdk-changelog.md
+            sdk-changelog.md
           retention-days: 1
           if-no-files-found: ignore
 
