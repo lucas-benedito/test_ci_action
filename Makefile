@@ -48,7 +48,7 @@ endif
 
 # Set the Operator SDK version to use. By default, what is installed on the system is used.
 # This is useful for CI or a project to utilize a specific version of the operator-sdk toolkit.
-OPERATOR_SDK_VERSION ?= v1.36.1
+OPERATOR_SDK_VERSION ?= v1.42.0
 
 # Image URL to use all building/pushing image targets
 IMG ?= $(IMAGE_TAG_BASE):$(VERSION)
@@ -104,13 +104,17 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 
 ##@ Deployment
 
+ifndef ignore-not-found
+  ignore-not-found = false
+endif
+
 .PHONY: install
 install: kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
 	$(KUSTOMIZE) build config/crd | kubectl apply -f -
 
 .PHONY: uninstall
 uninstall: kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config.
-	$(KUSTOMIZE) build config/crd | kubectl delete -f -
+	$(KUSTOMIZE) build config/crd | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
 
 .PHONY: deploy
 deploy: kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
@@ -119,7 +123,7 @@ deploy: kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/c
 
 .PHONY: undeploy
 undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config.
-	$(KUSTOMIZE) build config/default | kubectl delete -f -
+	$(KUSTOMIZE) build config/default | kubectl delete --ignore-not-found=$(ignore-not-found) -f -
 
 OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 ARCH := $(shell uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
@@ -132,7 +136,7 @@ ifeq (,$(shell which kustomize 2>/dev/null))
 	@{ \
 	set -e ;\
 	mkdir -p $(dir $(KUSTOMIZE)) ;\
-	curl -sSLo - https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.3.0/kustomize_v5.3.0_$(OS)_$(ARCH).tar.gz | \
+	curl -sSLo - https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/v5.6.0/kustomize_v5.6.0_$(OS)_$(ARCH).tar.gz | \
 	tar xzf - -C bin/ ;\
 	}
 else
@@ -172,6 +176,7 @@ OPERATOR_SDK = $(shell which operator-sdk)
 endif
 endif
 
+
 .PHONY: bundle
 bundle: kustomize operator-sdk ## Generate bundle manifests and metadata, then validate generated files.
 	$(OPERATOR_SDK) generate kustomize manifests -q
@@ -181,7 +186,7 @@ bundle: kustomize operator-sdk ## Generate bundle manifests and metadata, then v
 
 .PHONY: bundle-build
 bundle-build: ## Build the bundle image.
-	docker build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
+	$(CONTAINER_TOOL) build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
 
 .PHONY: bundle-push
 bundle-push: ## Push the bundle image.
@@ -195,7 +200,7 @@ ifeq (,$(shell which opm 2>/dev/null))
 	@{ \
 	set -e ;\
 	mkdir -p $(dir $(OPM)) ;\
-	curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/v1.23.0/$(OS)-$(ARCH)-opm ;\
+	curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/v1.55.0/$(OS)-$(ARCH)-opm ;\
 	chmod +x $(OPM) ;\
 	}
 else
@@ -220,7 +225,7 @@ endif
 # https://github.com/operator-framework/community-operators/blob/7f1438c/docs/packaging-operator.md#updating-your-existing-operator
 .PHONY: catalog-build
 catalog-build: opm ## Build a catalog image.
-	$(OPM) index add --container-tool docker --mode semver --tag $(CATALOG_IMG) --bundles $(BUNDLE_IMGS) $(FROM_INDEX_OPT)
+	$(OPM) index add --container-tool $(CONTAINER_TOOL) --mode semver --tag $(CATALOG_IMG) --bundles $(BUNDLE_IMGS) $(FROM_INDEX_OPT)
 
 # Push the catalog image.
 .PHONY: catalog-push
