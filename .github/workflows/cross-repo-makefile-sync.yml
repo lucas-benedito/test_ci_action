@@ -62,39 +62,47 @@ jobs:
             echo "version=${LATEST}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check for breaking changes
-        if: steps.current.outputs.version != steps.sdk.outputs.version
+      - name: Build SDK changelog
         env:
           CURRENT_VERSION: ${{ steps.current.outputs.version }}
           TARGET_VERSION: ${{ steps.sdk.outputs.version }}
         run: |
-          echo "Checking for breaking changes between ${CURRENT_VERSION} and ${TARGET_VERSION}..."
+          CHANGELOG_FILE="/tmp/sdk-changelog.md"
+
+          if [[ "${CURRENT_VERSION}" == "${TARGET_VERSION}" ]]; then
+            echo "SDK version unchanged (${CURRENT_VERSION})" > "${CHANGELOG_FILE}"
+            cat "${CHANGELOG_FILE}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "### SDK Version Change: ${CURRENT_VERSION} → ${TARGET_VERSION}" > "${CHANGELOG_FILE}"
+          echo "" >> "${CHANGELOG_FILE}"
 
           CURRENT_MINOR=$(echo "${CURRENT_VERSION}" | sed 's/^v//' | cut -d. -f1,2)
           TARGET_MINOR=$(echo "${TARGET_VERSION}" | sed 's/^v//' | cut -d. -f1,2)
 
           if [[ "${CURRENT_MINOR}" != "${TARGET_MINOR}" ]]; then
             echo "::warning::Minor version bump (${CURRENT_MINOR} → ${TARGET_MINOR}): may contain breaking changes"
+            echo "⚠️ **Minor version bump** (${CURRENT_MINOR} → ${TARGET_MINOR})" >> "${CHANGELOG_FILE}"
+            echo "" >> "${CHANGELOG_FILE}"
           fi
 
-          # Fetch release notes and scan for breaking/deprecation keywords
+          # Fetch release notes between current and target
           RELEASES_JSON=$(curl -sSL "https://api.github.com/repos/operator-framework/operator-sdk/releases?per_page=50")
-          BREAK_HITS=$(echo "${RELEASES_JSON}" | jq -r --arg from "${CURRENT_VERSION}" --arg to "${TARGET_VERSION}" '
-            [.[] | select(.tag_name > $from and .tag_name <= $to)] |
-            .[].body
-          ' 2>/dev/null | grep -iE '(breaking|deprecat|removed|incompatible|migration required)' | head -20 || true)
 
-          if [[ -n "${BREAK_HITS}" ]]; then
-            echo "## Potential Breaking Changes (${CURRENT_VERSION} → ${TARGET_VERSION})" >> "$GITHUB_STEP_SUMMARY"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            while IFS= read -r line; do
-              echo "- ${line}" >> "$GITHUB_STEP_SUMMARY"
-            done <<< "${BREAK_HITS}"
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "**Review the [operator-sdk changelog](https://github.com/operator-framework/operator-sdk/releases) before merging synced PRs.**" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "No breaking changes detected between ${CURRENT_VERSION} and ${TARGET_VERSION}" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          # Extract per-release summaries
+          echo "${RELEASES_JSON}" | jq -r --arg from "${CURRENT_VERSION}" --arg to "${TARGET_VERSION}" '
+            [.[] | select(.tag_name > $from and .tag_name <= $to)] |
+            sort_by(.tag_name) | .[] |
+            "#### " + .tag_name + "\n" + (.body | split("\n") |
+              map(select(test("breaking|deprecat|removed|incompatible|migration|bug|fix|feature|add|chang"; "i"))) |
+              map("- " + .) | join("\n"))
+          ' 2>/dev/null >> "${CHANGELOG_FILE}" || echo "_Could not fetch release notes_" >> "${CHANGELOG_FILE}"
+
+          echo "" >> "${CHANGELOG_FILE}"
+          echo "**Full changelog:** [operator-sdk releases](https://github.com/operator-framework/operator-sdk/releases)" >> "${CHANGELOG_FILE}"
+
+          cat "${CHANGELOG_FILE}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate Makefile from SDK
         if: steps.current.outputs.version != steps.sdk.outputs.version
@@ -117,13 +125,16 @@ jobs:
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload generated Makefile
-        if: steps.diff.outputs.has_changes == 'true'
+      - name: Upload artifacts
+        if: steps.diff.outputs.has_changes == 'true' || steps.current.outputs.version != steps.sdk.outputs.version
         uses: actions/upload-artifact@v4
         with:
-          name: generated-makefile
-          path: Makefile.generated
+          name: sync-artifacts
+          path: |
+            Makefile.generated
+            /tmp/sdk-changelog.md
           retention-days: 1
+          if-no-files-found: ignore
 
       - name: Determine if sync is needed
         id: should-sync
@@ -192,12 +203,13 @@ jobs:
         if: env.SKIP != 'true'
         uses: actions/checkout@v4
 
-      - name: Download generated Makefile
-        if: env.SKIP != 'true' && needs.prepare.outputs.has_makefile_update == 'true'
+      - name: Download sync artifacts
+        if: env.SKIP != 'true'
         uses: actions/download-artifact@v4
         with:
-          name: generated-makefile
-          path: /tmp/makefile-artifact
+          name: sync-artifacts
+          path: /tmp/sync-artifacts
+        continue-on-error: true
 
       - name: Sync to target repo
         if: env.SKIP != 'true'
@@ -215,8 +227,11 @@ jobs:
             --sdk-version "${SDK_VERSION}"
             --source-dir "."
           )
-          if [ "${HAS_MAKEFILE_UPDATE}" = "true" ]; then
-            ARGS+=(--makefile "/tmp/makefile-artifact/Makefile.generated")
+          if [ "${HAS_MAKEFILE_UPDATE}" = "true" ] && [ -f /tmp/sync-artifacts/Makefile.generated ]; then
+            ARGS+=(--makefile "/tmp/sync-artifacts/Makefile.generated")
+          fi
+          if [ -f /tmp/sync-artifacts/sdk-changelog.md ]; then
+            ARGS+=(--changelog "/tmp/sync-artifacts/sdk-changelog.md")
           fi
           if [ "${IS_DRY_RUN}" = "true" ]; then
             ARGS+=(--dry-run)

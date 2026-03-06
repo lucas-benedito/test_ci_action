@@ -26,6 +26,7 @@ DEFAULT_BRANCH=""
 SDK_VERSION=""
 SOURCE_DIR=""
 MAKEFILE_PATH=""
+CHANGELOG_PATH=""
 DRY_RUN="false"
 SYNC_BRANCH="automation/makefile-sync"
 
@@ -37,6 +38,7 @@ while [[ $# -gt 0 ]]; do
         --sdk-version)   SDK_VERSION="$2";    shift 2 ;;
         --source-dir)    SOURCE_DIR="$2";     shift 2 ;;
         --makefile)      MAKEFILE_PATH="$2";  shift 2 ;;
+        --changelog)     CHANGELOG_PATH="$2"; shift 2 ;;
         --sync-branch)   SYNC_BRANCH="$2";    shift 2 ;;
         --dry-run)       DRY_RUN="true";      shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -176,12 +178,20 @@ echo "${CHANGED}" | grep -q '^makefiles/common.mk$' && PR_FILES="${PR_FILES}- \`
 echo "${CHANGED}" | grep -q '^Dockerfile$'           && PR_FILES="${PR_FILES}- \`Dockerfile\` — FROM line updated to SDK ${SDK_VERSION}
 "
 
+CHANGELOG_SECTION=""
+if [ -n "${CHANGELOG_PATH}" ] && [ -f "${CHANGELOG_PATH}" ]; then
+    CHANGELOG_SECTION="
+$(cat "${CHANGELOG_PATH}")
+"
+fi
+
 PR_BODY="## Summary
 
 Automated sync of Makefile standardization files from \`aap-gateway-operator\` (Proposal 0100).
 
 ### Files synced
 ${PR_FILES}
+${CHANGELOG_SECTION}
 ### What to do
 1. Review the synced files
 2. Ensure your operator-specific config is in \`makefiles/operator.mk\` (not synced, operator-owned)
