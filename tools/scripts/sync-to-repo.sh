@@ -46,7 +46,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Validate ──────────────────────────────────────────────────
-for var in REPO DEFAULT_BRANCH SDK_VERSION SOURCE_DIR; do
+for var in REPO DEFAULT_BRANCH SOURCE_DIR; do
     if [ -z "${!var}" ]; then
         echo "ERROR: --$(echo $var | tr '[:upper:]' '[:lower:]' | tr '_' '-') is required"
         exit 1
@@ -64,7 +64,7 @@ echo ""
 echo "============================================"
 echo " Syncing ${REPO}"
 echo " Branch: ${DEFAULT_BRANCH}"
-echo " SDK: ${SDK_VERSION}"
+[ -n "${SDK_VERSION}" ] && echo " SDK: ${SDK_VERSION}"
 echo " Dry run: ${DRY_RUN}"
 echo "============================================"
 
@@ -93,8 +93,8 @@ if [ -n "${MAKEFILE_PATH}" ] && [ -f "${MAKEFILE_PATH}" ]; then
     echo "Copied generated Makefile from ${MAKEFILE_PATH}"
 fi
 
-# Update Dockerfile FROM line (if Dockerfile exists)
-if [ -f "${WORK_DIR}/Dockerfile" ]; then
+# Update Dockerfile FROM line (only when SDK version is explicitly provided)
+if [ -n "${SDK_VERSION}" ] && [ -f "${WORK_DIR}/Dockerfile" ]; then
     sed -i "s|^FROM quay.io/operator-framework/ansible-operator:.*|FROM quay.io/operator-framework/ansible-operator:${SDK_VERSION}|" \
         "${WORK_DIR}/Dockerfile"
 fi
@@ -149,18 +149,21 @@ git add makefiles/common.mk
 # Build list of actually changed files for the commit message
 CHANGED=$(git diff --cached --name-only)
 FILE_LINES=""
-echo "${CHANGED}" | grep -q '^Makefile$'             && FILE_LINES="${FILE_LINES}  - Makefile (standardized, SDK ${SDK_VERSION})
+echo "${CHANGED}" | grep -q '^Makefile$'             && FILE_LINES="${FILE_LINES}  - Makefile (standardized${SDK_VERSION:+, SDK ${SDK_VERSION}})
 "
 echo "${CHANGED}" | grep -q '^makefiles/common.mk$' && FILE_LINES="${FILE_LINES}  - makefiles/common.mk (shared dev targets)
 "
 echo "${CHANGED}" | grep -q '^Dockerfile$'           && FILE_LINES="${FILE_LINES}  - Dockerfile (FROM → SDK ${SDK_VERSION})
 "
 
+SDK_LINE=""
+[ -n "${SDK_VERSION}" ] && SDK_LINE="SDK version: ${SDK_VERSION}"
+
 git commit -m "chore: sync Makefile standardization from gateway-operator
 
 Synced files:
 ${FILE_LINES}
-SDK version: ${SDK_VERSION}
+${SDK_LINE}
 Source: aap-gateway-operator (Proposal 0100)
 
 Authored-By: AAP Makefile Sync <aap-makefile-sync[bot]@users.noreply.github.com>"
@@ -171,7 +174,7 @@ git push origin "${SYNC_BRANCH}"
 # ── Create PR ─────────────────────────────────────────────────
 # Build PR body with only the files that actually changed
 PR_FILES=""
-echo "${CHANGED}" | grep -q '^Makefile$'             && PR_FILES="${PR_FILES}- \`Makefile\` — standardized Makefile (SDK ${SDK_VERSION})
+echo "${CHANGED}" | grep -q '^Makefile$'             && PR_FILES="${PR_FILES}- \`Makefile\` — standardized Makefile${SDK_VERSION:+ (SDK ${SDK_VERSION})}
 "
 echo "${CHANGED}" | grep -q '^makefiles/common.mk$' && PR_FILES="${PR_FILES}- \`makefiles/common.mk\` — shared dev workflow targets
 "

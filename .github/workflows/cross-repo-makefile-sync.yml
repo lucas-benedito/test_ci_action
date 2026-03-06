@@ -46,15 +46,12 @@ jobs:
 
       - name: Resolve target SDK version
         id: sdk
+        if: github.event_name != 'push'
         env:
           INPUT_SDK_VERSION: ${{ inputs.sdk_version }}
-          CURRENT_VERSION: ${{ steps.current.outputs.version }}
         run: |
           if [ -n "${INPUT_SDK_VERSION}" ]; then
             echo "version=${INPUT_SDK_VERSION}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            # Push trigger: use current Makefile version
-            echo "version=${CURRENT_VERSION}" >> "$GITHUB_OUTPUT"
           else
             # Manual trigger without version: fetch latest
             LATEST=$(curl -sSL https://api.github.com/repos/operator-framework/operator-sdk/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
@@ -63,6 +60,7 @@ jobs:
           fi
 
       - name: Build SDK changelog
+        if: steps.sdk.outputs.version != '' && steps.current.outputs.version != steps.sdk.outputs.version
         env:
           CURRENT_VERSION: ${{ steps.current.outputs.version }}
           TARGET_VERSION: ${{ steps.sdk.outputs.version }}
@@ -105,7 +103,7 @@ jobs:
           cat "${CHANGELOG_FILE}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate Makefile from SDK
-        if: steps.current.outputs.version != steps.sdk.outputs.version
+        if: steps.sdk.outputs.version != '' && steps.current.outputs.version != steps.sdk.outputs.version
         env:
           SDK_VERSION: ${{ steps.sdk.outputs.version }}
         run: |
@@ -126,7 +124,7 @@ jobs:
           fi
 
       - name: Upload artifacts
-        if: steps.diff.outputs.has_changes == 'true' || steps.current.outputs.version != steps.sdk.outputs.version
+        if: steps.diff.outputs.has_changes == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: sync-artifacts
@@ -224,9 +222,11 @@ jobs:
           ARGS=(
             --repo "${REPO}"
             --branch "${DEFAULT_BRANCH}"
-            --sdk-version "${SDK_VERSION}"
             --source-dir "."
           )
+          if [ -n "${SDK_VERSION}" ] && [ "${HAS_MAKEFILE_UPDATE}" = "true" ]; then
+            ARGS+=(--sdk-version "${SDK_VERSION}")
+          fi
           if [ "${HAS_MAKEFILE_UPDATE}" = "true" ] && [ -f /tmp/sync-artifacts/Makefile.generated ]; then
             ARGS+=(--makefile "/tmp/sync-artifacts/Makefile.generated")
           fi
