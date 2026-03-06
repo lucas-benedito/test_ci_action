@@ -108,6 +108,19 @@ if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; the
     exit 0
 fi
 
+# ── Dry run ───────────────────────────────────────────────────
+if [ "${DRY_RUN}" = "true" ]; then
+    echo ""
+    echo "=== Dry run: changes for ${REPO} ==="
+    git diff --stat
+    git diff
+    echo ""
+    git ls-files --others --exclude-standard | while read -r f; do
+        echo "New file: ${f}"
+    done
+    exit 0
+fi
+
 # Sync branch already exists?
 if git ls-remote --exit-code origin "${SYNC_BRANCH}" >/dev/null 2>&1; then
     echo "Sync branch '${SYNC_BRANCH}' exists, comparing content..."
@@ -126,15 +139,6 @@ if git ls-remote --exit-code origin "${SYNC_BRANCH}" >/dev/null 2>&1; then
     echo "ERROR: Sync branch '${SYNC_BRANCH}' exists with different content."
     echo "Merge or close the existing PR in ${REPO} before re-syncing."
     exit 1
-fi
-
-# ── Dry run ───────────────────────────────────────────────────
-if [ "${DRY_RUN}" = "true" ]; then
-    echo ""
-    echo "=== Dry run: changes for ${REPO} ==="
-    git diff --stat
-    git diff
-    exit 0
 fi
 
 # ── Commit and push ──────────────────────────────────────────
