@@ -229,6 +229,6 @@ catalog-push: ## Push a catalog image.
 
 ##@ Includes
 # Operator-specific targets and variables
--include scripts/operator.mk
+-include makefiles/operator.mk
 # Shared dev workflow targets (synced across all operator repos)
--include scripts/common.mk
+-include makefiles/common.mk

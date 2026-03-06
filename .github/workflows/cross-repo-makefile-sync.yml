@@ -5,13 +5,13 @@ on:
   push:
     branches: [main]
     paths:
-      - 'Makefile'
-      - 'scripts/common.mk'
-  schedule:
-    # Weekly sync (Monday 9am UTC, after makefile-sync at 8am)
-    - cron: '0 9 * * 1'
+      - 'makefiles/common.mk'
   workflow_dispatch:
     inputs:
+      sdk_version:
+        description: 'Operator SDK version (e.g. v1.37.0). Leave empty for latest.'
+        required: false
+        type: string
       dry_run:
         description: 'Show diff without creating PRs'
         required: false
@@ -21,16 +21,130 @@ on:
         description: 'Sync only this repo (e.g. awx-operator). Leave empty for all.'
         required: false
         type: string
-      sdk_version:
-        description: 'Override SDK version (e.g. v1.37.0). Leave empty to use Makefile value.'
-        required: false
-        type: string
 
 permissions:
   contents: read
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      sdk_version: ${{ steps.sdk.outputs.version }}
+      current_version: ${{ steps.current.outputs.version }}
+      has_makefile_update: ${{ steps.diff.outputs.has_changes }}
+      should_sync: ${{ steps.should-sync.outputs.result }}
+    steps:
+      - name: Checkout source (gateway-operator)
+        uses: actions/checkout@v4
+
+      - name: Get current SDK version
+        id: current
+        run: |
+          CURRENT=$(grep 'OPERATOR_SDK_VERSION' Makefile | head -1 | grep -o 'v[0-9.]*' || echo "unknown")
+          echo "version=${CURRENT}" >> "$GITHUB_OUTPUT"
+          echo "Current OPERATOR_SDK_VERSION: ${CURRENT}"
+
+      - name: Resolve target SDK version
+        id: sdk
+        env:
+          INPUT_SDK_VERSION: ${{ inputs.sdk_version }}
+          CURRENT_VERSION: ${{ steps.current.outputs.version }}
+        run: |
+          if [ -n "${INPUT_SDK_VERSION}" ]; then
+            echo "version=${INPUT_SDK_VERSION}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            # Push trigger: use current Makefile version
+            echo "version=${CURRENT_VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            # Manual trigger without version: fetch latest
+            LATEST=$(curl -sSL https://api.github.com/repos/operator-framework/operator-sdk/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+            echo "Latest operator-sdk release: ${LATEST}"
+            echo "version=${LATEST}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check for breaking changes
+        if: steps.current.outputs.version != steps.sdk.outputs.version
+        env:
+          CURRENT_VERSION: ${{ steps.current.outputs.version }}
+          TARGET_VERSION: ${{ steps.sdk.outputs.version }}
+        run: |
+          echo "Checking for breaking changes between ${CURRENT_VERSION} and ${TARGET_VERSION}..."
+
+          CURRENT_MINOR=$(echo "${CURRENT_VERSION}" | sed 's/^v//' | cut -d. -f1,2)
+          TARGET_MINOR=$(echo "${TARGET_VERSION}" | sed 's/^v//' | cut -d. -f1,2)
+
+          if [[ "${CURRENT_MINOR}" != "${TARGET_MINOR}" ]]; then
+            echo "::warning::Minor version bump (${CURRENT_MINOR} → ${TARGET_MINOR}): may contain breaking changes"
+          fi
+
+          # Fetch release notes and scan for breaking/deprecation keywords
+          RELEASES_JSON=$(curl -sSL "https://api.github.com/repos/operator-framework/operator-sdk/releases?per_page=50")
+          BREAK_HITS=$(echo "${RELEASES_JSON}" | jq -r --arg from "${CURRENT_VERSION}" --arg to "${TARGET_VERSION}" '
+            [.[] | select(.tag_name > $from and .tag_name <= $to)] |
+            .[].body
+          ' 2>/dev/null | grep -iE '(breaking|deprecat|removed|incompatible|migration required)' | head -20 || true)
+
+          if [[ -n "${BREAK_HITS}" ]]; then
+            echo "## Potential Breaking Changes (${CURRENT_VERSION} → ${TARGET_VERSION})" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r line; do
+              echo "- ${line}" >> "$GITHUB_STEP_SUMMARY"
+            done <<< "${BREAK_HITS}"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Review the [operator-sdk changelog](https://github.com/operator-framework/operator-sdk/releases) before merging synced PRs.**" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No breaking changes detected between ${CURRENT_VERSION} and ${TARGET_VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Generate Makefile from SDK
+        if: steps.current.outputs.version != steps.sdk.outputs.version
+        env:
+          SDK_VERSION: ${{ steps.sdk.outputs.version }}
+        run: |
+          ./tools/scripts/generate-makefile.sh \
+            --sdk-version "${SDK_VERSION}" \
+            --output Makefile.generated
+
+      - name: Check for Makefile diff
+        id: diff
+        run: |
+          if [ -f Makefile.generated ] && ! diff -q Makefile Makefile.generated >/dev/null 2>&1; then
+            echo "Makefile changes detected"
+            diff -u Makefile Makefile.generated || true
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No Makefile changes"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload generated Makefile
+        if: steps.diff.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-makefile
+          path: Makefile.generated
+          retention-days: 1
+
+      - name: Determine if sync is needed
+        id: should-sync
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HAS_MAKEFILE_CHANGES: ${{ steps.diff.outputs.has_changes }}
+        run: |
+          if [ "${EVENT_NAME}" = "push" ]; then
+            # Push trigger means common.mk changed — always sync
+            echo "result=true" >> "$GITHUB_OUTPUT"
+          elif [ "${HAS_MAKEFILE_CHANGES}" = "true" ]; then
+            # Manual trigger with Makefile changes — sync
+            echo "result=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No changes to sync"
+            echo "result=false" >> "$GITHUB_OUTPUT"
+          fi
+
   sync-repos:
+    needs: prepare
+    if: needs.prepare.outputs.should_sync == 'true'
     runs-on: ubuntu-latest
     concurrency:
       group: cross-repo-sync-${{ matrix.repo }}
@@ -78,31 +192,22 @@ jobs:
         if: env.SKIP != 'true'
         uses: actions/checkout@v4
 
-      - name: Resolve SDK version
-        if: env.SKIP != 'true'
-        id: sdk
-        env:
-          INPUT_SDK_VERSION: ${{ inputs.sdk_version }}
-        run: |
-          if [ -n "${INPUT_SDK_VERSION}" ]; then
-            SDK_VER="${INPUT_SDK_VERSION}"
-          else
-            SDK_VER=$(grep 'OPERATOR_SDK_VERSION' Makefile | head -1 | grep -o 'v[0-9.]*')
-            if [ -z "${SDK_VER}" ]; then
-              echo "ERROR: Could not resolve OPERATOR_SDK_VERSION from Makefile"
-              exit 1
-            fi
-          fi
-          echo "version=${SDK_VER}" >> "$GITHUB_OUTPUT"
+      - name: Download generated Makefile
+        if: env.SKIP != 'true' && needs.prepare.outputs.has_makefile_update == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-makefile
+          path: /tmp/makefile-artifact
 
       - name: Sync to target repo
         if: env.SKIP != 'true'
         env:
           CROSS_REPO_PAT: ${{ secrets.CROSS_REPO_PAT }}
-          SDK_VERSION: ${{ steps.sdk.outputs.version }}
+          SDK_VERSION: ${{ needs.prepare.outputs.sdk_version }}
           REPO: ${{ matrix.org }}/${{ matrix.repo }}
           DEFAULT_BRANCH: ${{ matrix.default_branch }}
           IS_DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          HAS_MAKEFILE_UPDATE: ${{ needs.prepare.outputs.has_makefile_update }}
         run: |
           ARGS=(
             --repo "${REPO}"
@@ -110,6 +215,9 @@ jobs:
             --sdk-version "${SDK_VERSION}"
             --source-dir "."
           )
+          if [ "${HAS_MAKEFILE_UPDATE}" = "true" ]; then
+            ARGS+=(--makefile "/tmp/makefile-artifact/Makefile.generated")
+          fi
           if [ "${IS_DRY_RUN}" = "true" ]; then
             ARGS+=(--dry-run)
           fi

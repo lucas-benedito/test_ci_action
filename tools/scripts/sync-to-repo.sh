@@ -2,7 +2,8 @@
 #
 # sync-to-repo.sh — Sync Makefile standardization files to a target GitHub repo
 #
-# Copies Makefile, scripts/common.mk, and updates Dockerfile FROM line.
+# Copies makefiles/common.mk (and optionally a generated Makefile) to
+# a target repo. Updates Dockerfile FROM line.
 # Creates a PR if changes are needed. Fails if a stale PR already exists.
 #
 # Usage:
@@ -24,6 +25,7 @@ REPO=""
 DEFAULT_BRANCH=""
 SDK_VERSION=""
 SOURCE_DIR=""
+MAKEFILE_PATH=""
 DRY_RUN="false"
 SYNC_BRANCH="automation/makefile-sync"
 
@@ -34,6 +36,7 @@ while [[ $# -gt 0 ]]; do
         --branch)        DEFAULT_BRANCH="$2"; shift 2 ;;
         --sdk-version)   SDK_VERSION="$2";    shift 2 ;;
         --source-dir)    SOURCE_DIR="$2";     shift 2 ;;
+        --makefile)      MAKEFILE_PATH="$2";  shift 2 ;;
         --sync-branch)   SYNC_BRANCH="$2";    shift 2 ;;
         --dry-run)       DRY_RUN="true";      shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -78,14 +81,15 @@ git clone --depth 1 --branch "${DEFAULT_BRANCH}" \
     "https://github.com/${REPO}.git" "${WORK_DIR}"
 
 # ── Copy synced files ─────────────────────────────────────────
-mkdir -p "${WORK_DIR}/scripts/"
-cp "${SOURCE_DIR}/Makefile" "${WORK_DIR}/Makefile"
-cp "${SOURCE_DIR}/scripts/common.mk" "${WORK_DIR}/scripts/common.mk"
-echo "Copied Makefile and scripts/common.mk"
+mkdir -p "${WORK_DIR}/makefiles/"
+cp "${SOURCE_DIR}/makefiles/common.mk" "${WORK_DIR}/makefiles/common.mk"
+echo "Copied makefiles/common.mk"
 
-# Update OPERATOR_SDK_VERSION in the copied Makefile
-sed -i "s|^OPERATOR_SDK_VERSION ?= .*|OPERATOR_SDK_VERSION ?= ${SDK_VERSION}|" \
-    "${WORK_DIR}/Makefile"
+# Copy generated Makefile if provided
+if [ -n "${MAKEFILE_PATH}" ] && [ -f "${MAKEFILE_PATH}" ]; then
+    cp "${MAKEFILE_PATH}" "${WORK_DIR}/Makefile"
+    echo "Copied generated Makefile from ${MAKEFILE_PATH}"
+fi
 
 # Update Dockerfile FROM line (if Dockerfile exists)
 if [ -f "${WORK_DIR}/Dockerfile" ]; then
@@ -136,17 +140,18 @@ git config user.name "AAP Makefile Sync"
 git config user.email "aap-makefile-sync[bot]@users.noreply.github.com"
 git checkout -b "${SYNC_BRANCH}"
 
-git add Makefile scripts/common.mk
+git add makefiles/common.mk
+{ git diff --quiet Makefile 2>/dev/null || git add Makefile; }
 [ -f Dockerfile ] && { git diff --quiet Dockerfile 2>/dev/null || git add Dockerfile; }
 
 # Build list of actually changed files for the commit message
 CHANGED=$(git diff --cached --name-only)
 FILE_LINES=""
-echo "${CHANGED}" | grep -q '^Makefile$'         && FILE_LINES="${FILE_LINES}  - Makefile (standardized)
+echo "${CHANGED}" | grep -q '^Makefile$'             && FILE_LINES="${FILE_LINES}  - Makefile (standardized, SDK ${SDK_VERSION})
 "
-echo "${CHANGED}" | grep -q '^scripts/common.mk$' && FILE_LINES="${FILE_LINES}  - scripts/common.mk (shared dev targets)
+echo "${CHANGED}" | grep -q '^makefiles/common.mk$' && FILE_LINES="${FILE_LINES}  - makefiles/common.mk (shared dev targets)
 "
-echo "${CHANGED}" | grep -q '^Dockerfile$'        && FILE_LINES="${FILE_LINES}  - Dockerfile (FROM → SDK ${SDK_VERSION})
+echo "${CHANGED}" | grep -q '^Dockerfile$'           && FILE_LINES="${FILE_LINES}  - Dockerfile (FROM → SDK ${SDK_VERSION})
 "
 
 git commit -m "chore: sync Makefile standardization from gateway-operator
@@ -164,11 +169,11 @@ git push origin "${SYNC_BRANCH}"
 # ── Create PR ─────────────────────────────────────────────────
 # Build PR body with only the files that actually changed
 PR_FILES=""
-echo "${CHANGED}" | grep -q '^Makefile$'         && PR_FILES="${PR_FILES}- \`Makefile\` — standardized Makefile (identical across all operator repos)
+echo "${CHANGED}" | grep -q '^Makefile$'             && PR_FILES="${PR_FILES}- \`Makefile\` — standardized Makefile (SDK ${SDK_VERSION})
 "
-echo "${CHANGED}" | grep -q '^scripts/common.mk$' && PR_FILES="${PR_FILES}- \`scripts/common.mk\` — shared dev workflow targets
+echo "${CHANGED}" | grep -q '^makefiles/common.mk$' && PR_FILES="${PR_FILES}- \`makefiles/common.mk\` — shared dev workflow targets
 "
-echo "${CHANGED}" | grep -q '^Dockerfile$'        && PR_FILES="${PR_FILES}- \`Dockerfile\` — FROM line updated to SDK ${SDK_VERSION}
+echo "${CHANGED}" | grep -q '^Dockerfile$'           && PR_FILES="${PR_FILES}- \`Dockerfile\` — FROM line updated to SDK ${SDK_VERSION}
 "
 
 PR_BODY="## Summary
@@ -179,7 +184,7 @@ Automated sync of Makefile standardization files from \`aap-gateway-operator\` (
 ${PR_FILES}
 ### What to do
 1. Review the synced files
-2. Ensure your operator-specific config is in \`scripts/operator.mk\` (not synced, operator-owned)
+2. Ensure your operator-specific config is in \`makefiles/operator.mk\` (not synced, operator-owned)
 3. Test: \`make help\` should show targets from all three files
 4. Merge when ready
 
