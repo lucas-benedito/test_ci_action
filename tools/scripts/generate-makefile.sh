@@ -23,7 +23,7 @@
 set -euo pipefail
 
 # --- Configuration ---
-OPERATOR_SDK_VERSION="${OPERATOR_SDK_VERSION:-v1.36.1}"
+OPERATOR_SDK_VERSION="${OPERATOR_SDK_VERSION:-}"
 OUTPUT_MAKEFILE="${OUTPUT_MAKEFILE:-Makefile}"
 DRY_RUN="${DRY_RUN:-false}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,6 +69,12 @@ detect_platform() {
 }
 
 PLATFORM="$(detect_platform)"
+
+if [[ -z "${OPERATOR_SDK_VERSION}" ]]; then
+    echo "ERROR: --sdk-version is required"
+    exit 1
+fi
+
 echo "==> Platform: ${PLATFORM}"
 echo "==> SDK Version: ${OPERATOR_SDK_VERSION}"
 
